@@ -1,6 +1,6 @@
-model,id,difficulty,correct,reason,sql
-GPT-5.6 Terra,1,hard,True,match,"SELECT CAST(SUM(total_runs) AS REAL) / COUNT(DISTINCT match_id)
-FROM deliveries"
+model,id,difficulty,correct,reason,sql,latency_sec,input_tokens,output_tokens,cost_usd
+GPT-5.6 Terra,1,hard,True,match,"SELECT SUM(total_runs) * 1.0 / COUNT(DISTINCT match_id) AS average_runs_per_match
+FROM deliveries",2.254,380,30,0.00112
 GPT-5.6 Terra,2,hard,False,mismatch,"WITH batter_stats AS (
   SELECT
     batter,
@@ -15,99 +15,108 @@ SELECT
   ROUND(100.0 * boundary_runs / total_runs, 2) AS boundary_percentage
 FROM batter_stats
 ORDER BY boundary_percentage DESC
-LIMIT 1"
+LIMIT 1",3.536,392,209,0.003292
 GPT-5.6 Terra,3,hard,True,match,"SELECT COUNT(*)
 FROM (
-  SELECT batter
-  FROM deliveries
-  GROUP BY batter
-  HAVING SUM(batsman_runs) >= 1000
-)"
+  SELECT d.batter
+  FROM deliveries AS d
+  JOIN matches AS m ON d.match_id = m.id
+  GROUP BY d.batter
+  HAVING SUM(d.batsman_runs) >= 1000
+)",1.856,369,57,0.001422
 GPT-5.6 Terra,4,hard,True,match,"SELECT bowler, COUNT(*) AS ball_count
 FROM deliveries
-WHERE COALESCE(extras_type, '') NOT IN ('wides', 'noballs')
+WHERE extras_type IS NULL
+   OR LOWER(extras_type) NOT IN ('wides', 'wide', 'noballs', 'no-ball', 'no balls')
 GROUP BY bowler
 ORDER BY ball_count DESC
-LIMIT 1"
+LIMIT 1",3.575,379,189,0.003026
 GPT-5.6 Terra,5,hard,True,match,"SELECT
   batter,
   SUM(batsman_runs) AS runs
 FROM deliveries
 GROUP BY match_id, batter
 ORDER BY runs DESC
-LIMIT 1"
-GPT-5.6 Terra,6,hard,True,match,"WITH first_innings AS (
+LIMIT 1",1.655,374,37,0.001192
+GPT-5.6 Terra,6,hard,True,match,"SELECT m.winner AS team, COUNT(*) AS wins
+FROM matches AS m
+JOIN (
   SELECT match_id, batting_team
   FROM deliveries
   WHERE inning = 1
   GROUP BY match_id, batting_team
-)
-SELECT m.winner AS team, COUNT(*) AS wins
-FROM matches AS m
-JOIN first_innings AS fi
-  ON m.id = fi.match_id
+) AS first_innings
+  ON m.id = first_innings.match_id
 WHERE m.winner IS NOT NULL
-  AND m.winner <> fi.batting_team
+  AND m.winner <> first_innings.batting_team
 GROUP BY m.winner
 ORDER BY wins DESC
-LIMIT 1"
+LIMIT 1",3.877,400,219,0.003428
 GPT-5.6 Terra,7,hard,True,match,"SELECT SUM(total_runs) AS total_powerplay_runs
 FROM deliveries
-WHERE ""over"" BETWEEN 0 AND 5"
+WHERE ""over"" BETWEEN 0 AND 5",1.793,376,28,0.001088
 GPT-5.6 Terra,8,hard,True,match,"SELECT batter, SUM(batsman_runs) AS runs
 FROM deliveries
 WHERE ""over"" BETWEEN 15 AND 19
 GROUP BY batter
 ORDER BY runs DESC
-LIMIT 1"
-GPT-5.6 Terra,9,brutal,True,match,"SELECT
+LIMIT 1",2.536,379,112,0.002102
+GPT-5.6 Terra,9,brutal,True,match,"WITH batter_stats AS (
+  SELECT
+    batter,
+    SUM(batsman_runs) AS runs,
+    SUM(CASE WHEN LOWER(COALESCE(extras_type, '')) NOT IN ('wide', 'wides') THEN 1 ELSE 0 END) AS legal_balls
+  FROM deliveries
+  GROUP BY batter
+)
+SELECT
   batter,
-  100.0 * SUM(batsman_runs) /
-    SUM(CASE WHEN LOWER(COALESCE(extras_type, '')) NOT IN ('wide', 'wides') THEN 1 ELSE 0 END) AS strike_rate
-FROM deliveries
-GROUP BY batter
-HAVING SUM(batsman_runs) >= 300
-ORDER BY strike_rate DESC, batter
-LIMIT 1"
-GPT-5.6 Terra,10,brutal,False,mismatch,"WITH bowler_stats AS (
+  runs * 100.0 / legal_balls AS strike_rate
+FROM batter_stats
+WHERE runs >= 300
+  AND legal_balls > 0
+ORDER BY strike_rate DESC
+LIMIT 1",4.37,399,249,0.003786
+GPT-5.6 Terra,10,brutal,False,mismatch,"WITH bowling_stats AS (
   SELECT
     bowler,
     SUM(
       CASE
-        WHEN LOWER(COALESCE(extras_type, '')) IN ('byes', 'legbyes', 'penalty')
-          THEN total_runs - extra_runs
-        ELSE total_runs
+        WHEN LOWER(COALESCE(extras_type, '')) NOT IN ('wide', 'wides', 'noball', 'noballs', 'no-ball', 'no-balls')
+        THEN 1 ELSE 0
       END
-    ) AS runs_conceded,
+    ) AS legal_balls,
     SUM(
       CASE
-        WHEN LOWER(COALESCE(extras_type, '')) NOT IN ('wides', 'noballs') THEN 1
-        ELSE 0
+        WHEN LOWER(COALESCE(extras_type, '')) IN ('byes', 'legbyes', 'penalty')
+        THEN batsman_runs
+        ELSE total_runs
       END
-    ) AS legal_balls
+    ) AS runs_conceded
   FROM deliveries
   GROUP BY bowler
 )
 SELECT
   bowler,
   ROUND(runs_conceded * 6.0 / legal_balls, 2) AS economy
-FROM bowler_stats
+FROM bowling_stats
 WHERE legal_balls >= 1000
-ORDER BY economy ASC
-LIMIT 1"
+ORDER BY runs_conceded * 6.0 / legal_balls ASC
+LIMIT 1",9.396,402,670,0.008844
 GPT-5.6 Terra,11,brutal,False,mismatch,"WITH bowling_stats AS (
   SELECT
     bowler,
     SUM(
-      total_runs - CASE
-        WHEN extras_type IN ('byes', 'legbyes') THEN extra_runs
+      batsman_runs +
+      CASE
+        WHEN extras_type IN ('wides', 'noballs') THEN extra_runs
         ELSE 0
       END
     ) AS runs_conceded,
     SUM(
       CASE
         WHEN is_wicket = 1
-          AND dismissal_kind NOT IN ('run out', 'retired hurt', 'retired out', 'obstructing the field')
+         AND dismissal_kind NOT IN ('run out', 'retired hurt', 'retired out', 'obstructing the field')
         THEN 1
         ELSE 0
       END
@@ -117,11 +126,11 @@ GPT-5.6 Terra,11,brutal,False,mismatch,"WITH bowling_stats AS (
 )
 SELECT
   bowler,
-  CAST(runs_conceded AS REAL) / wickets AS bowling_average
+  ROUND(1.0 * runs_conceded / wickets, 2) AS bowling_average
 FROM bowling_stats
 WHERE wickets >= 30
 ORDER BY bowling_average ASC
-LIMIT 1"
+LIMIT 1",9.246,403,609,0.008114
 GPT-5.6 Terra,12,brutal,True,match,"WITH team_runs AS (
   SELECT
     m.season,
@@ -146,7 +155,7 @@ ranked AS (
 SELECT season, team, runs
 FROM ranked
 WHERE rn = 1
-ORDER BY season"
+ORDER BY season",3.574,382,212,0.003308
 GPT-5.6 Terra,13,brutal,True,match,"SELECT
   batter,
   CAST(SUM(batsman_runs) AS REAL) / COUNT(DISTINCT match_id) AS average_runs_per_match
@@ -154,18 +163,17 @@ FROM deliveries
 GROUP BY batter
 HAVING COUNT(DISTINCT match_id) >= 30
 ORDER BY average_runs_per_match DESC
-LIMIT 1"
-GPT-5.6 Terra,14,brutal,True,match,"SELECT
-  d.batting_team AS winning_team,
-  SUM(d.total_runs) AS runs
-FROM deliveries AS d
-JOIN matches AS m
+LIMIT 1",3.042,390,149,0.002568
+GPT-5.6 Terra,14,brutal,True,match,"SELECT m.winner AS winning_team,
+       SUM(d.total_runs) AS runs
+FROM matches AS m
+JOIN deliveries AS d
   ON m.id = d.match_id
 WHERE d.inning = 2
   AND m.winner = d.batting_team
-GROUP BY d.match_id, d.batting_team
+GROUP BY m.id, m.winner
 ORDER BY runs DESC
-LIMIT 1"
+LIMIT 1",4.209,386,235,0.003592
 GPT-5.6 Terra,15,brutal,True,match,"SELECT
   bowler,
   COUNT(*) AS wicket_count
@@ -180,10 +188,8 @@ WHERE ""over"" BETWEEN 15 AND 19
   )
 GROUP BY bowler
 ORDER BY wicket_count DESC
-LIMIT 1"
-GPT-5.6 Terra,16,brutal,True,match,"SELECT
-  batter,
-  COUNT(*) AS balls_faced
+LIMIT 1",3.008,398,143,0.002512
+GPT-5.6 Terra,16,brutal,True,match,"SELECT batter, COUNT(*) AS balls_faced
 FROM deliveries
 WHERE batter NOT IN (
   SELECT player_dismissed
@@ -192,15 +198,15 @@ WHERE batter NOT IN (
 )
 GROUP BY batter
 ORDER BY balls_faced DESC
-LIMIT 1"
-GPT-5.6 Terra,17,brutal,True,match,"SELECT 100.0 * SUM(CASE WHEN toss_winner = winner AND toss_decision = 'field' THEN 1 ELSE 0 END) / COUNT(*) AS percentage
-FROM matches"
+LIMIT 1",3.573,400,250,0.0038
+GPT-5.6 Terra,17,brutal,True,match,"SELECT 100.0 * SUM(CASE WHEN toss_decision = 'field' AND winner = toss_winner THEN 1 ELSE 0 END) / COUNT(*) AS percentage
+FROM matches",2.06,380,89,0.001828
 GPT-5.6 Terra,18,brutal,False,mismatch,"WITH team_matches AS (
-  SELECT season, team1 AS team, winner
+  SELECT team1 AS team, winner
   FROM matches
   WHERE season = '2023'
   UNION ALL
-  SELECT season, team2 AS team, winner
+  SELECT team2 AS team, winner
   FROM matches
   WHERE season = '2023'
 ),
@@ -218,541 +224,139 @@ SELECT
 FROM team_stats
 WHERE matches_played >= 5
 ORDER BY win_percentage DESC
-LIMIT 1"
+LIMIT 1",3.632,386,245,0.003712
 GPT-5.6 Terra,19,brutal,True,match,"SELECT
   bowler,
   player_dismissed AS batter,
   COUNT(*) AS dismissal_count
 FROM deliveries
 WHERE is_wicket = 1
-  AND dismissal_kind IN ('bowled', 'caught', 'lbw', 'stumped', 'caught and bowled', 'hit wicket')
+  AND dismissal_kind IN ('bowled', 'caught', 'caught and bowled', 'lbw', 'stumped', 'hit wicket')
 GROUP BY bowler, player_dismissed
 ORDER BY dismissal_count DESC
-LIMIT 1"
-GPT-5.6 Terra,20,brutal,True,match,"WITH successful_chases AS (
-  SELECT DISTINCT m.id
-  FROM matches AS m
-  JOIN deliveries AS d
-    ON m.id = d.match_id
-  WHERE d.inning = 2
-    AND d.batting_team = m.winner
-),
-first_innings_totals AS (
+LIMIT 1",5.475,391,333,0.004778
+GPT-5.6 Terra,20,brutal,True,match,"SELECT AVG(first_innings_total)
+FROM (
   SELECT d.match_id, SUM(d.total_runs) AS first_innings_total
   FROM deliveries AS d
-  JOIN successful_chases AS sc
-    ON d.match_id = sc.id
+  JOIN matches AS m ON m.id = d.match_id
   WHERE d.inning = 1
+    AND EXISTS (
+      SELECT 1
+      FROM deliveries AS d2
+      WHERE d2.match_id = m.id
+        AND d2.inning = 2
+        AND d2.batting_team = m.winner
+    )
   GROUP BY d.match_id
-)
-SELECT AVG(first_innings_total)
-FROM first_innings_totals"
-Kimi K3,1,hard,True,match,SELECT 1.0 * SUM(total_runs) / COUNT(DISTINCT match_id) FROM deliveries
-Kimi K3,2,hard,False,mismatch,"SELECT batter,
-       ROUND(100.0 * SUM(CASE WHEN batsman_runs IN (4, 6) THEN batsman_runs ELSE 0 END) / SUM(batsman_runs), 2) AS boundary_percentage
+)",3.961,381,228,0.003498
+Gemini Flash Lite,1,hard,True,match,SELECT CAST(SUM(total_runs) AS REAL) / COUNT(DISTINCT match_id) FROM deliveries,9.776,432,29,0.000202
+Gemini Flash Lite,2,hard,True,match,"SELECT 
+    batter,
+    (SUM(CASE WHEN batsman_runs IN (4, 6) THEN batsman_runs ELSE 0 END) * 100.0 / SUM(batsman_runs)) AS boundary_percentage
 FROM deliveries
 GROUP BY batter
 HAVING SUM(batsman_runs) >= 500
 ORDER BY boundary_percentage DESC
-LIMIT 1"
-Kimi K3,3,hard,True,match,"SELECT COUNT(*) AS player_count
-FROM (
-  SELECT batter, SUM(batsman_runs) AS total_runs
-  FROM deliveries
-  GROUP BY batter
-  HAVING SUM(batsman_runs) >= 1000
-)"
-Kimi K3,4,hard,True,match,"SELECT bowler, COUNT(*) AS ball_count
-FROM deliveries
-WHERE extras_type IS NULL OR extras_type NOT IN ('wides', 'noballs')
-GROUP BY bowler
-ORDER BY ball_count DESC
-LIMIT 1"
-Kimi K3,5,hard,True,match,"SELECT batter, SUM(batsman_runs) AS runs
+LIMIT 1",1.481,445,90,0.000358
+Gemini Flash Lite,3,hard,True,match,SELECT count(*) FROM (SELECT batter FROM deliveries GROUP BY batter HAVING sum(batsman_runs) >= 1000),0.931,423,32,0.000207
+Gemini Flash Lite,4,hard,True,match,"SELECT bowler, COUNT(*) AS ball_count FROM deliveries WHERE extras_type NOT IN ('wides', 'noballs') OR extras_type IS NULL GROUP BY bowler ORDER BY ball_count DESC LIMIT 1",1.249,428,49,0.000251
+Gemini Flash Lite,5,hard,True,match,"SELECT batter, SUM(batsman_runs) AS total_runs
 FROM deliveries
 GROUP BY match_id, batter
-ORDER BY runs DESC
-LIMIT 1"
-Kimi K3,6,hard,False,sql_error,"WITH first_innings AS (
-  SELECT DISTINCT match_id, batting_team AS first_batting_team
-  FROM deliveries
-  WHERE inning = 1
-)
-SELECT m.winner AS team, COUNT(*) AS wins
-FROM matches m
-JOIN first_innings fi ON fi.match"
-Kimi K3,7,hard,True,match,"SELECT SUM(total_runs) AS total_powerplay_runs
-FROM deliveries
-WHERE over BETWEEN 0 AND 5"
-Kimi K3,8,hard,True,match,"SELECT batter, SUM(batsman_runs) AS runs
-FROM deliveries
-WHERE over BETWEEN 15 AND 19
-GROUP BY batter
-ORDER BY runs DESC
-LIMIT 1"
-Kimi K3,9,brutal,False,sql_error,
-Kimi K3,10,brutal,False,sql_error,
-Kimi K3,11,brutal,False,sql_error,
-Kimi K3,12,brutal,True,match,"WITH team_runs AS (
-  SELECT m.season, d.batting_team AS team, SUM(d.total_runs) AS runs
-  FROM deliveries d
-  JOIN matches m ON d.match_id = m.id
-  GROUP BY m.season, d.batting_team
-),
-ranked AS (
-  SELECT season, team, runs,
-         ROW_NUMBER() OVER (PARTITION BY season ORDER BY runs DESC) AS rn
-  FROM team_runs
-)
-SELECT season, team, runs
-FROM ranked
-WHERE rn = 1
-ORDER BY season"
-Kimi K3,13,brutal,True,match,"SELECT batter, SUM(batsman_runs) * 1.0 / COUNT(DISTINCT match_id) AS average_runs_per_match
-FROM deliveries
-GROUP BY batter
-HAVING COUNT(DISTINCT match_id) >= 30
-ORDER BY average_runs_per_match DESC
-LIMIT 1"
-Kimi K3,14,brutal,False,sql_error,
-Kimi K3,15,brutal,True,match,"SELECT bowler, COUNT(*) AS wickets
-FROM deliveries
-WHERE over BETWEEN 15 AND 19
-  AND is_wicket = 1
-  AND (dismissal_kind IS NULL OR LOWER(dismissal_kind) NOT IN ('run out', 'retired hurt', 'retired out', 'obstructing the field'))
-GROUP BY bowler
-ORDER BY wickets DESC, bowler ASC
-LIMIT 1"
-Kimi K3,16,brutal,True,match,"SELECT batter, COUNT(*) AS balls_faced
-FROM deliveries
-WHERE batter NOT IN (
-    SELECT DISTINCT player_dismissed
-    FROM deliveries
-    WHERE player_dismissed IS NOT NULL
-)
-GROUP BY batter
-ORDER BY balls_faced DESC
-LIMIT 1"
-Kimi K3,17,brutal,False,mismatch,"SELECT ROUND(100.0 * SUM(CASE WHEN winner = toss_winner AND LOWER(toss_decision) = 'field' THEN 1 ELSE 0 END) / COUNT(*), 2) AS percentage FROM matches"
-Kimi K3,18,brutal,False,mismatch,"SELECT 
-  team,
-  ROUND(100.0 * SUM(CASE WHEN winner = team THEN 1 ELSE 0 END) / COUNT(*), 2) AS win_percentage
-FROM (
-  SELECT team1 AS team, winner FROM matches WHERE season = '2023'
-  UNION ALL
-  SELECT team2 AS team, winner FROM matches WHERE season = '2023'
-) t
-GROUP BY team
-HAVING COUNT(*) >= 5
-ORDER BY win_percentage DESC
-LIMIT 1"
-Kimi K3,19,brutal,False,sql_error,
-Kimi K3,20,brutal,True,match,"SELECT AVG(t.first_innings_total)
-FROM (
-    SELECT match_id, SUM(total_runs) AS first_innings_total
-    FROM deliveries
-    WHERE inning = 1
-    GROUP BY match_id
-) t
-JOIN matches m ON m.id = t.match_id
-WHERE m.result = 'wickets'"
-Grok 4.5,1,hard,True,match,SELECT SUM(total_runs) * 1.0 / (SELECT COUNT(*) FROM matches) FROM deliveries
-Grok 4.5,2,hard,True,match,"SELECT batter, (SUM(CASE WHEN batsman_runs IN (4, 6) THEN batsman_runs ELSE 0 END) * 100.0 / SUM(batsman_runs)) AS boundary_percentage
-FROM deliveries
-GROUP BY batter
-HAVING SUM(batsman_runs) >= 500
-ORDER BY boundary_percentage DESC
-LIMIT 1"
-Grok 4.5,3,hard,True,match,SELECT COUNT(*) FROM (SELECT batter FROM deliveries GROUP BY batter HAVING SUM(batsman_runs) >= 1000)
-Grok 4.5,4,hard,True,match,"SELECT bowler, COUNT(*) AS ball_count
-FROM deliveries
-WHERE extras_type IS NULL OR extras_type NOT IN ('wides', 'noballs', 'wide', 'noball')
-GROUP BY bowler
-ORDER BY ball_count DESC
-LIMIT 1"
-Grok 4.5,5,hard,True,match,"SELECT batter, SUM(batsman_runs) AS runs FROM deliveries GROUP BY match_id, batter ORDER BY runs DESC LIMIT 1"
-Grok 4.5,6,hard,True,match,"SELECT m.winner AS team, COUNT(*) AS wins
-FROM matches m
-JOIN (
-  SELECT match_id, batting_team AS first_batting_team
-  FROM deliveries
-  WHERE inning = 1
-  GROUP BY match_id, batting_team
-) f ON m.id = f.match_id
-WHERE m.winner IS NOT NULL
-  AND m.winner != f.first_batting_team
-GROUP BY m.winner
-ORDER BY wins DESC
-LIMIT 1"
-Grok 4.5,7,hard,True,match,"SELECT SUM(total_runs) FROM deliveries WHERE ""over"" BETWEEN 0 AND 5"
-Grok 4.5,8,hard,True,match,"SELECT batter, SUM(batsman_runs) AS runs
-FROM deliveries
-WHERE ""over"" BETWEEN 15 AND 19
-GROUP BY batter
-ORDER BY runs DESC
-LIMIT 1"
-Grok 4.5,9,brutal,True,match,"SELECT batter, SUM(batsman_runs) * 100.0 / SUM(CASE WHEN extras_type IS NULL OR extras_type != 'wides' THEN 1 ELSE 0 END) AS strike_rate
-FROM deliveries
-GROUP BY batter
-HAVING SUM(batsman_runs) >= 300
-ORDER BY strike_rate DESC
-LIMIT 1"
-Grok 4.5,10,brutal,False,mismatch,"SELECT
-  bowler,
-  (SUM(batsman_runs + CASE WHEN extras_type IN ('wides', 'noballs') THEN extra_runs ELSE 0 END) * 6.0)
-    / SUM(CASE WHEN COALESCE(extras_type, '') NOT IN ('wides', 'noballs') THEN 1 ELSE 0 END) AS economy
-FROM deliveries
-GROUP BY bowler
-HAVING SUM(CASE WHEN COALESCE(extras_type, '') NOT IN ('wides', 'noballs') THEN 1 ELSE 0 END) >= 1000
-ORDER BY economy ASC
-LIMIT 1"
-Grok 4.5,11,brutal,False,mismatch,"SELECT bowler, SUM(batsman_runs + CASE WHEN extras_type IN ('wides', 'noballs') THEN extra_runs ELSE 0 END) * 1.0 / SUM(CASE WHEN is_wicket = 1 AND dismissal_kind NOT IN ('run out', 'retired hurt', 'retired out', 'obstructing the field') THEN 1 ELSE 0 END) AS average
-FROM deliveries
-GROUP BY bowler
-HAVING SUM(CASE WHEN is_wicket = 1 AND dismissal_kind NOT IN ('run out', 'retired hurt', 'retired out', 'obstructing the field') THEN 1 ELSE 0 END) >= 30
-ORDER BY average ASC
-LIMIT 1"
-Grok 4.5,12,brutal,True,match,"WITH team_runs AS (
-  SELECT m.season, d.batting_team AS team, SUM(d.total_runs) AS runs
-  FROM deliveries d
-  JOIN matches m ON d.match_id = m.id
-  GROUP BY m.season, d.batting_team
-),
-ranked AS (
-  SELECT season, team, runs,
-         ROW_NUMBER() OVER (PARTITION BY season ORDER BY runs DESC) AS rn
-  FROM team_runs
-)
-SELECT season, team, runs
-FROM ranked
-WHERE rn = 1
-ORDER BY season"
-Grok 4.5,13,brutal,True,match,"SELECT batter, SUM(batsman_runs) * 1.0 / COUNT(DISTINCT match_id) AS avg_runs_per_match
-FROM deliveries
-GROUP BY batter
-HAVING COUNT(DISTINCT match_id) >= 30
-ORDER BY avg_runs_per_match DESC
-LIMIT 1"
-Grok 4.5,14,brutal,True,match,"SELECT m.winner, SUM(d.total_runs) AS second_innings_total
-FROM matches m
-JOIN deliveries d ON m.id = d.match_id
-WHERE d.inning = 2 AND m.winner = d.batting_team
-GROUP BY m.id, m.winner
-ORDER BY second_innings_total DESC
-LIMIT 1"
-Grok 4.5,15,brutal,True,match,"SELECT bowler, COUNT(*) AS wicket_count
-FROM deliveries
-WHERE ""over"" BETWEEN 15 AND 19
-  AND is_wicket = 1
-  AND dismissal_kind NOT IN ('run out', 'retired hurt', 'retired out', 'obstructing the field')
-GROUP BY bowler
-ORDER BY wicket_count DESC
-LIMIT 1"
-Grok 4.5,16,brutal,True,match,"SELECT batter, COUNT(*) AS balls_faced
-FROM deliveries
-WHERE batter NOT IN (
-  SELECT DISTINCT player_dismissed
-  FROM deliveries
-  WHERE player_dismissed IS NOT NULL
-)
-GROUP BY batter
-ORDER BY balls_faced DESC
-LIMIT 1"
-Grok 4.5,17,brutal,True,match,SELECT (COUNT(CASE WHEN toss_decision = 'field' AND toss_winner = winner THEN 1 END) * 100.0 / COUNT(*)) AS percentage FROM matches
-Grok 4.5,18,brutal,True,match,"SELECT team, (wins * 100.0 / matches) AS win_percentage
-FROM (
-  SELECT 
-    team, 
-    COUNT(*) AS matches, 
-    SUM(CASE WHEN winner = team THEN 1 ELSE 0 END) AS wins
-  FROM (
-    SELECT team1 AS team, winner FROM matches WHERE season = '2023'
-    UNION ALL
-    SELECT team2 AS team, winner FROM matches WHERE season = '2023'
-  ) AS all_teams
-  GROUP BY team
-  HAVING COUNT(*) >= 5
-) AS stats
-ORDER BY win_percentage DESC
-LIMIT 1"
-Grok 4.5,19,brutal,True,match,"SELECT bowler, player_dismissed AS batter, COUNT(*) AS count
-FROM deliveries
-WHERE is_wicket = 1
-  AND dismissal_kind IS NOT NULL
-  AND lower(dismissal_kind) NOT IN ('run out', 'retired hurt', 'retired out', 'obstructing the field')
-GROUP BY bowler, player_dismissed
-ORDER BY count DESC
-LIMIT 1"
-Grok 4.5,20,brutal,True,match,"SELECT AVG(fi.total) AS avg_first_innings_total
-FROM (
-  SELECT match_id, SUM(total_runs) AS total
-  FROM deliveries
-  WHERE inning = 1
-  GROUP BY match_id
-) fi
-JOIN matches m ON fi.match_id = m.id
-JOIN (
-  SELECT DISTINCT match_id, batting_team
-  FROM deliveries
-  WHERE inning = 2
-) si ON fi.match_id = si.match_id
-WHERE m.winner = si.batting_team"
-Claude Sonnet 5,1,hard,True,match,"SELECT SUM(total_runs) * 1.0 / COUNT(DISTINCT match_id) AS avg_runs_per_match
-FROM deliveries"
-Claude Sonnet 5,2,hard,True,match,"SELECT batter,
-       100.0 * SUM(CASE WHEN batsman_runs IN (4,6) THEN batsman_runs ELSE 0 END) / SUM(batsman_runs) AS boundary_percentage
-FROM deliveries
-GROUP BY batter
-HAVING SUM(batsman_runs) >= 500
-ORDER BY boundary_percentage DESC
-LIMIT 1"
-Claude Sonnet 5,3,hard,True,match,"SELECT COUNT(*) FROM (
-  SELECT batter, SUM(batsman_runs) AS total_runs
-  FROM deliveries
-  GROUP BY batter
-  HAVING SUM(batsman_runs) >= 1000
-)"
-Claude Sonnet 5,4,hard,True,match,"SELECT bowler, COUNT(*) AS ball_count
-FROM deliveries
-WHERE extras_type IS NULL OR extras_type NOT IN ('wides', 'noballs')
-GROUP BY bowler
-ORDER BY ball_count DESC
-LIMIT 1"
-Claude Sonnet 5,5,hard,True,match,"SELECT batter, SUM(batsman_runs) AS runs
-FROM deliveries
-GROUP BY match_id, batter
-ORDER BY runs DESC
-LIMIT 1"
-Claude Sonnet 5,6,hard,True,match,"SELECT m.winner AS team, COUNT(*) AS wins
-FROM matches m
-JOIN (
-    SELECT match_id, batting_team AS first_batting_team
-    FROM deliveries
-    WHERE inning = 1
-    GROUP BY match_id
-) d ON d.match_id = m.id
-WHERE m.winner != d.first_batting_team
-GROUP BY m.winner
-ORDER BY wins DESC
-LIMIT 1"
-Claude Sonnet 5,7,hard,True,match,"SELECT SUM(total_runs) AS total_powerplay_runs
-FROM deliveries
-WHERE over BETWEEN 0 AND 5"
-Claude Sonnet 5,8,hard,True,match,"SELECT batter, SUM(batsman_runs) AS total_runs
-FROM deliveries
-WHERE over BETWEEN 15 AND 19
-GROUP BY batter
 ORDER BY total_runs DESC
-LIMIT 1"
-Claude Sonnet 5,9,brutal,True,match,"SELECT batter,
-       SUM(batsman_runs) * 100.0 / SUM(CASE WHEN extras_type != 'wides' OR extras_type IS NULL THEN 1 ELSE 0 END) AS strike_rate
+LIMIT 1",1.037,426,42,0.000233
+Gemini Flash Lite,6,hard,True,match,"SELECT m.winner AS team, COUNT(*) AS wins
+FROM matches m
+JOIN (
+    SELECT match_id, batting_team AS team1_batting
+    FROM deliveries
+    WHERE inning = 1
+    GROUP BY match_id
+) d ON m.id = d.match_id
+WHERE m.winner IS NOT NULL 
+  AND m.winner != '' 
+  AND m.winner != 'No Result' 
+  AND m.winner != 'Tie'
+  AND m.winner != d.team1_batting
+GROUP BY m.winner
+ORDER BY wins DESC
+LIMIT 1",1.412,454,140,0.000486
+Gemini Flash Lite,7,hard,True,match,"SELECT sum(total_runs) FROM deliveries WHERE ""over"" BETWEEN 0 AND 5",2.016,428,25,0.000191
+Gemini Flash Lite,8,hard,True,match,"SELECT batter, SUM(batsman_runs) AS runs
+FROM deliveries
+WHERE ""over"" BETWEEN 15 AND 19
+GROUP BY batter
+ORDER BY runs DESC
+LIMIT 1",1.312,433,47,0.000247
+Gemini Flash Lite,9,brutal,True,match,"SELECT 
+    batter,
+    (SUM(batsman_runs) * 100.0 / SUM(CASE WHEN extras_type = 'wides' THEN 0 ELSE 1 END)) AS strike_rate
 FROM deliveries
 GROUP BY batter
 HAVING SUM(batsman_runs) >= 300
 ORDER BY strike_rate DESC
-LIMIT 1"
-Claude Sonnet 5,10,brutal,False,mismatch,"SELECT bowler,
-       SUM(total_runs) * 6.0 / COUNT(*) AS economy
+LIMIT 1",7.728,454,87,0.000354
+Gemini Flash Lite,10,brutal,False,mismatch,"SELECT 
+    bowler, 
+    SUM(total_runs - COALESCE(extra_runs, 0)) * 6.0 / COUNT(*) AS economy
 FROM deliveries
 WHERE extras_type IS NULL OR extras_type NOT IN ('wides', 'noballs')
 GROUP BY bowler
 HAVING COUNT(*) >= 1000
 ORDER BY economy ASC
-LIMIT 1"
-Claude Sonnet 5,11,brutal,False,mismatch,"SELECT bowler,
-       SUM(total_runs - COALESCE(CASE WHEN extras_type = 'legbyes' THEN extra_runs ELSE 0 END, 0)
-           - COALESCE(CASE WHEN extras_type = 'byes' THEN extra_runs ELSE 0 END, 0)) * 1.0
-       / SUM(CASE WHEN is_wicket = 1 AND dismissal_kind NOT IN ('run out','retired hurt','retired out','obstructing the field') THEN 1 ELSE 0 END) AS bowling_average
+LIMIT 1",1.119,452,91,0.000363
+Gemini Flash Lite,11,brutal,False,mismatch,"SELECT 
+    bowler, 
+    CAST(SUM(total_runs - COALESCE(extra_runs, 0)) AS REAL) / SUM(CASE WHEN is_wicket = 1 AND dismissal_kind NOT IN ('run out', 'retired hurt', 'retired out', 'obstructing the field') THEN 1 ELSE 0 END) AS bowling_average
 FROM deliveries
 GROUP BY bowler
-HAVING SUM(CASE WHEN is_wicket = 1 AND dismissal_kind NOT IN ('run out','retired hurt','retired out','obstructing the field') THEN 1 ELSE 0 END) >= 30
+HAVING SUM(CASE WHEN is_wicket = 1 AND dismissal_kind NOT IN ('run out', 'retired hurt', 'retired out', 'obstructing the field') THEN 1 ELSE 0 END) >= 30
 ORDER BY bowling_average ASC
-LIMIT 1"
-Claude Sonnet 5,12,brutal,True,match,"WITH team_season_runs AS (
-    SELECT
+LIMIT 1",1.355,452,154,0.000521
+Gemini Flash Lite,12,brutal,True,match,"WITH team_season_runs AS (
+    SELECT 
         m.season,
         d.batting_team AS team,
-        SUM(d.total_runs) AS total_runs
+        SUM(d.total_runs) AS runs
     FROM deliveries d
     JOIN matches m ON d.match_id = m.id
     GROUP BY m.season, d.batting_team
 ),
-ranked AS (
-    SELECT
+ranked_teams AS (
+    SELECT 
         season,
         team,
-        total_runs,
-        RANK() OVER (PARTITION BY season ORDER BY total_runs DESC) AS rnk
+        runs,
+        ROW_NUMBER() OVER (PARTITION BY season ORDER BY runs DESC) as rn
     FROM team_season_runs
 )
-SELECT season, team, total_runs
-FROM ranked
-WHERE rnk = 1
-ORDER BY season"
-Claude Sonnet 5,13,brutal,True,match,"SELECT batter,
-       SUM(batsman_runs) * 1.0 / COUNT(DISTINCT match_id) AS avg_runs_per_match
-FROM deliveries
-GROUP BY batter
-HAVING COUNT(DISTINCT match_id) >= 30
-ORDER BY avg_runs_per_match DESC
-LIMIT 1"
-Claude Sonnet 5,14,brutal,True,match,"SELECT d.batting_team AS winning_team, SUM(d.total_runs) AS runs
-FROM deliveries d
-JOIN matches m ON d.match_id = m.id
-WHERE d.inning = 2
-  AND d.batting_team = m.winner
-GROUP BY d.match_id, d.batting_team
-ORDER BY runs DESC
-LIMIT 1"
-Claude Sonnet 5,15,brutal,True,match,"SELECT bowler, COUNT(*) AS wickets
-FROM deliveries
-WHERE over BETWEEN 15 AND 19
-  AND is_wicket = 1
-  AND dismissal_kind NOT IN ('run out', 'retired hurt', 'retired out', 'obstructing the field')
-GROUP BY bowler
-ORDER BY wickets DESC
-LIMIT 1"
-Claude Sonnet 5,16,brutal,True,match,"SELECT batter, COUNT(*) AS balls_faced
-FROM deliveries
-WHERE batter NOT IN (SELECT DISTINCT player_dismissed FROM deliveries WHERE player_dismissed IS NOT NULL)
-GROUP BY batter
-ORDER BY balls_faced DESC
-LIMIT 1"
-Claude Sonnet 5,17,brutal,False,mismatch,"SELECT ROUND(100.0 * SUM(CASE WHEN toss_winner = winner AND toss_decision = 'field' THEN 1 ELSE 0 END) / COUNT(*), 2) AS percentage
-FROM matches"
-Claude Sonnet 5,18,brutal,True,match,"SELECT team,
-       wins * 100.0 / played AS win_percentage
-FROM (
-    SELECT team,
-           COUNT(*) AS played,
-           SUM(CASE WHEN team = winner THEN 1 ELSE 0 END) AS wins
-    FROM (
-        SELECT id, team1 AS team, winner FROM matches WHERE season = '2023'
-        UNION ALL
-        SELECT id, team2 AS team, winner FROM matches WHERE season = '2023'
-    )
-    GROUP BY team
-    HAVING played >= 5
-)
-ORDER BY win_percentage DESC
-LIMIT 1"
-Claude Sonnet 5,19,brutal,True,match,"SELECT bowler, player_dismissed AS batter, COUNT(*) AS dismissal_count
-FROM deliveries
-WHERE is_wicket = 1
-  AND dismissal_kind NOT IN ('run out', 'retired hurt', 'retired out', 'obstructing the field')
-GROUP BY bowler, player_dismissed
-ORDER BY dismissal_count DESC
-LIMIT 1"
-Claude Sonnet 5,20,brutal,True,match,"SELECT AVG(inning1_total) AS avg_first_innings_total
-FROM (
-  SELECT d.match_id, SUM(d.total_runs) AS inning1_total
-  FROM deliveries d
-  JOIN matches m ON d.match_id = m.id
-  WHERE d.inning = 1
-    AND m.winner = m.team2
-  GROUP BY d.match_id
-)"
-MiniMax M3,1,hard,True,match,SELECT SUM(total_runs) * 1.0 / COUNT(DISTINCT match_id) FROM deliveries
-MiniMax M3,2,hard,False,mismatch,"WITH batter_runs AS (
-  SELECT 
-    batter,
-    SUM(batsman_runs) AS total_runs,
-    SUM(CASE WHEN batsman_runs = 4 OR batsman_runs = 6 THEN batsman_runs ELSE 0 END) AS boundary_runs
-  FROM deliveries
-  GROUP BY batter
-  HAVING SUM(batsman_runs) >= 500
-)
-SELECT 
-  batter,
-  ROUND(100.0 * boundary_runs / total_runs, 2) AS boundary_percentage
-FROM batter_runs
-ORDER BY boundary_percentage DESC
-LIMIT 1"
-MiniMax M3,3,hard,True,match,"SELECT COUNT(*) FROM (
-  SELECT batter, SUM(batsman_runs) AS total_runs
-  FROM deliveries
-  GROUP BY batter
-  HAVING SUM(batsman_runs) >= 1000
-)"
-MiniMax M3,4,hard,True,match,"SELECT bowler, COUNT(*) AS ball_count
-FROM deliveries
-WHERE extras_type IS NULL OR extras_type NOT IN ('wides', 'noballs')
-GROUP BY bowler
-ORDER BY ball_count DESC
-LIMIT 1"
-MiniMax M3,5,hard,True,match,"SELECT batter, SUM(batsman_runs) AS total_runs
-FROM deliveries
-GROUP BY match_id, batter
-ORDER BY total_runs DESC
-LIMIT 1"
-MiniMax M3,6,hard,True,match,"SELECT m.winner AS team, COUNT(*) AS wins
-FROM matches m
-WHERE m.winner IS NOT NULL
-  AND m.winner = (
-    SELECT d.bowling_team
-    FROM deliveries d
-    WHERE d.match_id = m.id AND d.inning = 1
-    LIMIT 1
-  )
-GROUP BY m.winner
-ORDER BY wins DESC
-LIMIT 1"
-MiniMax M3,7,hard,True,match,SELECT SUM(total_runs) FROM deliveries WHERE over BETWEEN 0 AND 5
-MiniMax M3,8,hard,True,match,"SELECT batter, SUM(batsman_runs) AS total_runs
-FROM deliveries
-WHERE over BETWEEN 15 AND 19
-GROUP BY batter
-ORDER BY total_runs DESC
-LIMIT 1"
-MiniMax M3,9,brutal,False,sql_error,
-MiniMax M3,10,brutal,False,sql_error,
-MiniMax M3,11,brutal,False,sql_error,
-MiniMax M3,12,brutal,True,match,"WITH team_runs AS (
-  SELECT 
-    m.season,
-    d.batting_team,
-    SUM(d.total_runs) AS total_runs
-  FROM matches m
-  JOIN deliveries d ON m.id = d.match_id
-  GROUP BY m.season, d.batting_team
-),
-ranked AS (
-  SELECT 
-    season,
-    batting_team,
-    total_runs,
-    ROW_NUMBER() OVER (PARTITION BY season ORDER BY total_runs DESC) AS rn
-  FROM team_runs
-)
-SELECT season, batting_team, total_runs
-FROM ranked
+SELECT season, team, runs
+FROM ranked_teams
 WHERE rn = 1
-ORDER BY season"
-MiniMax M3,13,brutal,True,match,"SELECT batter, SUM(batsman_runs) * 1.0 / COUNT(DISTINCT match_id) AS avg_runs_per_match
+ORDER BY season",1.535,434,156,0.00052
+Gemini Flash Lite,13,brutal,True,match,"SELECT batter, CAST(SUM(batsman_runs) AS REAL) / COUNT(DISTINCT match_id) AS avg_runs
 FROM deliveries
 GROUP BY batter
 HAVING COUNT(DISTINCT match_id) >= 30
-ORDER BY avg_runs_per_match DESC
-LIMIT 1"
-MiniMax M3,14,brutal,True,match,"SELECT 
-    m.winner,
-    SUM(d.total_runs) AS second_innings_total
+ORDER BY avg_runs DESC
+LIMIT 1",1.495,441,67,0.0003
+Gemini Flash Lite,14,brutal,True,match,"SELECT m.winner, SUM(d.total_runs) AS total_runs
 FROM matches m
 JOIN deliveries d ON m.id = d.match_id
-WHERE d.inning = 2
-  AND m.winner = d.batting_team
-GROUP BY m.id, m.winner
-ORDER BY second_innings_total DESC
-LIMIT 1"
-MiniMax M3,15,brutal,True,match,"SELECT bowler, COUNT(*) AS wicket_count
+WHERE m.result = 'wickets' AND d.inning = 2
+GROUP BY m.id
+ORDER BY total_runs DESC
+LIMIT 1",25.71,438,75,0.000319
+Gemini Flash Lite,15,brutal,True,match,"SELECT bowler, COUNT(*) AS wicket_count
 FROM deliveries
-WHERE over BETWEEN 15 AND 19
+WHERE ""over"" BETWEEN 15 AND 19
   AND is_wicket = 1
   AND dismissal_kind NOT IN ('run out', 'retired hurt', 'retired out', 'obstructing the field')
 GROUP BY bowler
 ORDER BY wicket_count DESC
-LIMIT 1"
-MiniMax M3,16,brutal,True,match,"SELECT batter, COUNT(*) AS balls_faced
+LIMIT 1",2.027,449,82,0.00034
+Gemini Flash Lite,16,brutal,True,match,"SELECT batter, COUNT(*) AS balls_faced
 FROM deliveries
 WHERE batter NOT IN (
     SELECT DISTINCT player_dismissed 
@@ -761,51 +365,42 @@ WHERE batter NOT IN (
 )
 GROUP BY batter
 ORDER BY balls_faced DESC
-LIMIT 1"
-MiniMax M3,17,brutal,True,match,SELECT CAST(SUM(CASE WHEN toss_winner = winner AND toss_decision = 'field' THEN 1 ELSE 0 END) AS REAL) * 100 / COUNT(*) FROM matches
-MiniMax M3,18,brutal,False,mismatch,"WITH season_matches AS (
-  SELECT
-    team1 AS team,
-    id
-  FROM matches
-  WHERE season = '2023'
-  UNION ALL
-  SELECT
-    team2 AS team,
-    id
-  FROM matches
-  WHERE season = '2023'
-),
-team_match_counts AS (
-  SELECT
-    team,
-    COUNT(DISTINCT id) AS matches_played
-  FROM season_matches
-  GROUP BY team
-  HAVING COUNT(DISTINCT id) >= 5
-),
-team_wins AS (
-  SELECT
-    winner AS team,
-    COUNT(*) AS wins
-  FROM matches
-  WHERE season = '2023'
-    AND winner IS NOT NULL
-    AND winner IN (SELECT team FROM team_match_counts)
-  GROUP BY winner
+LIMIT 1",1.618,452,65,0.000298
+Gemini Flash Lite,17,brutal,True,match,"SELECT 
+    (CAST(SUM(CASE WHEN toss_winner = winner AND toss_decision = 'field' THEN 1 ELSE 0 END) AS REAL) * 100) / COUNT(*) 
+FROM matches",1.143,432,54,0.000265
+Gemini Flash Lite,18,brutal,True,match,"SELECT 
+    team, 
+    (CAST(wins AS REAL) / total_matches) * 100 AS win_percentage
+FROM (
+    SELECT 
+        t.team,
+        SUM(CASE WHEN m.winner = t.team THEN 1 ELSE 0 END) AS wins,
+        COUNT(*) AS total_matches
+    FROM matches m
+    JOIN (
+        SELECT DISTINCT team1 AS team FROM matches WHERE season = '2023'
+        UNION
+        SELECT DISTINCT team2 AS team FROM matches WHERE season = '2023'
+    ) t ON t.team = m.team1 OR t.team = m.team2
+    WHERE m.season = '2023'
+    GROUP BY t.team
+    HAVING COUNT(*) >= 5
 )
-SELECT
-  tmc.team,
-  ROUND(100.0 * COALESCE(tw.wins, 0) / tmc.matches_played, 2) AS win_percentage
-FROM team_match_counts tmc
-LEFT JOIN team_wins tw ON tmc.team = tw.team
 ORDER BY win_percentage DESC
-LIMIT 1"
-MiniMax M3,19,brutal,False,mismatch,"SELECT bowler, batter, COUNT(*) AS dismissals
+LIMIT 1",3.681,440,195,0.00062
+Gemini Flash Lite,19,brutal,True,match,"SELECT bowler, player_dismissed AS batter, COUNT(*) AS count
 FROM deliveries
-WHERE is_wicket = 1
-  AND dismissal_kind IN ('bowled', 'caught', 'LBW', 'stumped', 'caught and bowled', 'hit wicket')
-GROUP BY bowler, batter
-ORDER BY dismissals DESC
-LIMIT 1"
-MiniMax M3,20,brutal,False,sql_error,
+WHERE is_wicket = 1 
+  AND player_dismissed IS NOT NULL 
+  AND dismissal_kind NOT IN ('run out', 'retired hurt', 'retired out', 'obstructing the field')
+GROUP BY bowler, player_dismissed
+ORDER BY count DESC
+LIMIT 1",1.673,440,88,0.000352
+Gemini Flash Lite,20,brutal,True,match,"SELECT avg(first_innings_total) FROM (
+  SELECT m.id, sum(d.total_runs) AS first_innings_total
+  FROM matches m
+  JOIN deliveries d ON m.id = d.match_id
+  WHERE m.winner = m.team2 AND d.inning = 1
+  GROUP BY m.id
+)",16.25,433,84,0.00034
